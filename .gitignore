@@ -1,0 +1,12 @@
+# FastF1 cache
+cache/
+
+# Raw data
+data/raw/
+
+# Python
+__pycache__/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
