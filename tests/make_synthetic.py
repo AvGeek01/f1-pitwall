@@ -61,12 +61,12 @@ def generate_synthetic_data(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Generate and save synthetic lap and per-circuit pit-loss DataFrames.
 
-    Each of three circuits has five races in each of two seasons. Every race
-    has 20 drivers completing 55 laps. By default, Parquet files are written to
-    the repository's ``data/processed`` directory.
+    Each of three circuits has five races in each of the 2023, 2024, and 2025
+    seasons. Every race has 20 drivers completing 55 laps. By default, Parquet
+    files are written to the repository's ``data/processed`` directory.
     """
     rng = np.random.default_rng(seed)
-    seasons = (2023, 2024)
+    seasons = (2023, 2024, 2025)
     drivers = [f"DRV{number:02d}" for number in range(1, 21)]
     teams = {driver: f"Team {(index // 2) + 1:02d}" for index, driver in enumerate(drivers)}
     driver_pace = dict(zip(drivers, rng.normal(0.0, 0.38, len(drivers))))
