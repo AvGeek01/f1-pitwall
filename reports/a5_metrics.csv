@@ -1,0 +1,7 @@
+model,metric,value
+A4 baseline,MAE,4.26654127019252
+A5 XGBoost regressor,MAE,3.8095202735400777
+A5 XGBoost classifier,PR-AUC,0.4455413884676543
+A5 XGBoost classifier,F1,0.4695065890285014
+A5 XGBoost classifier,OOF training F1,0.46057571964909205
+A5 XGBoost classifier,Selected threshold,0.7706156373023987

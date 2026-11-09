@@ -4,6 +4,8 @@
 import pandas as pd
 import pytest
 
+from src.models import pit_lap
+
 from src.models.pit_lap import (
     split_by_season,
     predict_baseline,
@@ -139,3 +141,151 @@ def test_grouped_cv_runs_without_race_overlap():
     assert (results["validation_races"] == 1).all()
 
     assert (results["validation_samples"] == 1).all()
+
+
+def make_a5_validation_dataset():
+    """Create the minimum dataset required by A5 feature validation."""
+
+    data = {
+        column: [0, 1, 2, 3]
+        for column in pit_lap.A5_FEATURES
+    }
+
+    data.update({
+        pit_lap.A5_TARGET_REGRESSION: [5.0, 4.0, 3.0, 2.0],
+        pit_lap.A5_TARGET_CLASSIFICATION: [0, 0, 1, 0],
+        "season": [2023, 2023, 2024, 2024],
+        "round": [1, 1, 2, 2],
+        "race": ["Race A", "Race A", "Race B", "Race B"],
+    })
+
+    return pd.DataFrame(data)
+
+
+def test_validate_a5_features_accepts_valid_data():
+    """Valid A5 predictors, targets and race identifiers are accepted."""
+
+    data = make_a5_validation_dataset()
+
+    pit_lap.validate_a5_features(data)
+
+
+def test_validate_a5_features_rejects_missing_feature():
+    """A5 validation must identify missing predictor columns."""
+
+    data = make_a5_validation_dataset()
+    data = data.drop(columns=[pit_lap.A5_FEATURES[0]])
+
+    with pytest.raises(ValueError, match="Missing columns"):
+        pit_lap.validate_a5_features(data)
+
+
+def test_calculate_scale_pos_weight():
+    """Class imbalance weight equals negatives divided by positives."""
+
+    target = pd.Series([0, 0, 0, 1])
+
+    result = pit_lap.calculate_scale_pos_weight(target)
+
+    assert result == 3.0
+
+
+def test_scale_pos_weight_rejects_no_positive_samples():
+    """The class weight cannot be calculated without positive samples."""
+
+    target = pd.Series([0, 0, 0, 0])
+
+    with pytest.raises(ValueError, match="no positive"):
+        pit_lap.calculate_scale_pos_weight(target)
+
+
+def test_valid_training_rows_removes_missing_targets():
+    """Rows without known target values must be excluded."""
+
+    data = pd.DataFrame({
+        "feature": [10, 20, 30],
+        "target": [1.0, None, 3.0],
+    })
+
+    result = pit_lap._valid_training_rows(data, "target")
+
+    assert len(result) == 2
+    assert result["target"].notna().all()
+
+
+def test_group_cv_keeps_races_separate():
+    """A race must never appear in both sides of a CV fold."""
+
+    data = pd.DataFrame({
+        "season": [2023, 2023, 2023, 2023],
+        "round": [1, 1, 2, 2],
+        "race": ["A", "A", "B", "B"],
+    })
+
+    splitter, groups = pit_lap._check_group_cv(data, n_splits=2)
+
+    for train_indices, validation_indices in splitter.split(
+        data,
+        groups=groups,
+    ):
+        train_races = set(groups.iloc[train_indices])
+        validation_races = set(groups.iloc[validation_indices])
+
+        assert train_races.isdisjoint(validation_races)
+
+
+def test_f1_threshold_selection():
+    """Threshold selection returns a valid threshold and F1 score."""
+
+    actual = pd.Series([0, 0, 1, 1])
+    probabilities = pd.Series([0.10, 0.30, 0.70, 0.90])
+
+    threshold, f1 = pit_lap.select_f1_threshold(
+        actual,
+        probabilities,
+    )
+
+    assert 0.0 <= threshold <= 1.0
+    assert 0.0 <= f1 <= 1.0
+    assert f1 > 0.0
+
+
+def test_f1_threshold_rejects_single_class():
+    """Threshold selection requires both positive and negative labels."""
+
+    actual = pd.Series([0, 0, 0])
+    probabilities = pd.Series([0.1, 0.2, 0.3])
+
+    with pytest.raises(ValueError, match="both classes"):
+        pit_lap.select_f1_threshold(actual, probabilities)
+
+
+def test_build_a5_pipeline_supports_both_tasks():
+    """A5 must build separate regression and classification pipelines."""
+
+    regression = pit_lap.build_a5_pipeline(
+        task="regression",
+        parameters={"n_estimators": 5, "max_depth": 2},
+    )
+
+    classification = pit_lap.build_a5_pipeline(
+        task="classification",
+        parameters={"n_estimators": 5, "max_depth": 2},
+        scale_pos_weight=3.0,
+    )
+
+    assert "preprocessor" in regression.named_steps
+    assert "model" in regression.named_steps
+
+    assert "preprocessor" in classification.named_steps
+    assert "model" in classification.named_steps
+
+
+def test_build_a5_pipeline_rejects_invalid_task():
+    """Unknown model tasks must raise a clear error."""
+
+    with pytest.raises(ValueError, match="task must be"):
+        pit_lap.build_a5_pipeline(
+            task="invalid",
+            parameters={},
+        )
