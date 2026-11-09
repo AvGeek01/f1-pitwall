@@ -111,6 +111,8 @@ def simulate_race(
     safety_car_probability: float = 0.05,
     safety_car_pit_loss_factor: float = 0.5,
     safety_car_lap_slowdown_s: float = 8.0,
+    initial_tyre_age: int = 0,
+    initial_pit_stop: bool = False,
 ) -> np.ndarray:
     """Simulate total race times using vectorized Monte Carlo draws.
 
@@ -138,6 +140,12 @@ def simulate_race(
         raise ValueError("pace, fuel, noise, and safety-car slowdown must be finite")
     if lap_time_noise_s < 0:
         raise ValueError("lap_time_noise_s cannot be negative")
+    if (
+        not isinstance(initial_tyre_age, (int, np.integer))
+        or isinstance(initial_tyre_age, bool)
+        or initial_tyre_age < 0
+    ):
+        raise ValueError("initial_tyre_age must be a non-negative integer")
 
     normalized_strategy = _validate_strategy(strategy, n_laps)
     pit_loss_mean, pit_loss_std = _get_pit_loss(
@@ -173,7 +181,12 @@ def simulate_race(
     lap_index = 0
     pit_stop_ends: list[int] = []
     for stint_index, (compound, stint_length) in enumerate(normalized_strategy):
-        lap_ages = np.arange(1, stint_length + 1, dtype=float)
+        first_lap_age = initial_tyre_age + 1 if stint_index == 0 else 1
+        lap_ages = np.arange(
+            first_lap_age,
+            first_lap_age + stint_length,
+            dtype=float,
+        )
         losses = np.array(
             [
                 get_degradation(compound, tyre_age, circuit)
@@ -193,6 +206,14 @@ def simulate_race(
             pit_stop_ends.append(lap_index - 1)
 
     total_times = lap_times.sum(axis=1)
+    if initial_pit_stop:
+        sampled_pit_loss = rng.normal(pit_loss_mean, pit_loss_std, size=n_sims)
+        total_times += np.where(
+            safety_car_active[:, 0],
+            sampled_pit_loss * safety_car_pit_loss_factor,
+            sampled_pit_loss,
+        )
+
     for pit_lap_index in pit_stop_ends:
         sampled_pit_loss = rng.normal(pit_loss_mean, pit_loss_std, size=n_sims)
         reduced_pit_loss = np.where(
@@ -223,6 +244,8 @@ def compare_strategies(
     safety_car_probability: float = 0.05,
     safety_car_pit_loss_factor: float = 0.5,
     safety_car_lap_slowdown_s: float = 8.0,
+    initial_tyre_age: int = 0,
+    initial_pit_stop: bool = False,
 ) -> pd.DataFrame:
     """Compare strategy time distributions and probability of being fastest.
 
@@ -252,6 +275,8 @@ def compare_strategies(
             safety_car_probability=safety_car_probability,
             safety_car_pit_loss_factor=safety_car_pit_loss_factor,
             safety_car_lap_slowdown_s=safety_car_lap_slowdown_s,
+            initial_tyre_age=initial_tyre_age,
+            initial_pit_stop=initial_pit_stop,
         )
         for name, strategy in strategies.items()
     }

@@ -78,6 +78,47 @@ def test_adding_a_stop_increases_race_time_without_degradation() -> None:
     np.testing.assert_allclose(one_stop - no_stop, 20.0)
 
 
+def test_initial_pit_stop_is_charged_and_uses_fresh_tyre_age() -> None:
+    """A pit-now simulation charges a stop and resets its first stint age."""
+    worn_tyre = simulate_race(
+        [("MEDIUM", 5)],
+        "Test Circuit",
+        5,
+        n_sims=10,
+        pit_loss_data=make_pit_loss_data(mean=20.0),
+        degradation_fn=linear_degradation,
+        initial_tyre_age=5,
+        lap_time_noise_s=0.0,
+        safety_car_probability=0.0,
+    )
+    fresh_tyre = simulate_race(
+        [("MEDIUM", 5)],
+        "Test Circuit",
+        5,
+        n_sims=10,
+        pit_loss_data=make_pit_loss_data(mean=20.0),
+        degradation_fn=linear_degradation,
+        initial_tyre_age=0,
+        lap_time_noise_s=0.0,
+        safety_car_probability=0.0,
+    )
+    pit_now = simulate_race(
+        [("MEDIUM", 5)],
+        "Test Circuit",
+        5,
+        n_sims=10,
+        pit_loss_data=make_pit_loss_data(mean=20.0),
+        degradation_fn=linear_degradation,
+        initial_tyre_age=0,
+        initial_pit_stop=True,
+        lap_time_noise_s=0.0,
+        safety_car_probability=0.0,
+    )
+
+    assert np.all(fresh_tyre < worn_tyre)
+    np.testing.assert_allclose(pit_now - fresh_tyre, 20.0)
+
+
 def test_compare_strategies_returns_required_summary() -> None:
     """Comparison results include race-time percentiles and fastest chance."""
     summaries = compare_strategies(
