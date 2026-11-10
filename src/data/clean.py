@@ -3,15 +3,54 @@
 
 from __future__ import annotations
 
+import argparse
 import logging
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
 
+from src.data.schema import (
+    MAX_PLAUSIBLE_LAP_DURATION_S,
+    MIN_PLAUSIBLE_LAP_DURATION_S,
+    MIN_PLAUSIBLE_TIMESTAMP_FALLBACK_S,
+)
+
 logger = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RAW_PARQUET_DIRECTORY = (
+    PROJECT_ROOT / "data" / "raw" / "openf1_parquet"
+)
 DEFAULT_FUEL_EFFECT = 0.03
+DEFAULT_RAW_ENDPOINTS = (
+    "sessions",
+    "meetings",
+    "laps",
+    "stints",
+    "pit",
+    "weather",
+    "race_control",
+    "position",
+    "starting_grid",
+    "drivers",
+    "intervals",
+    "session_result",
+)
+CLI_RAW_ENDPOINTS = (
+    "laps",
+    "stints",
+    "pit",
+    "weather",
+    "race_control",
+    "position",
+    "starting_grid",
+    "drivers",
+    "sessions",
+    "meetings",
+    "session_result",
+)
 
 LAPS_CLEAN_COLUMNS = [
     "season",
@@ -28,6 +67,7 @@ LAPS_CLEAN_COLUMNS = [
     "stint",
     "position",
     "grid_position",
+    "grid_source",
     "is_inlap",
     "is_outlap",
     "is_sc",
@@ -36,6 +76,168 @@ LAPS_CLEAN_COLUMNS = [
     "track_temp",
     "rainfall",
 ]
+
+
+def load_raw_data(
+    years: Sequence[int],
+    data_directory: str | Path = DEFAULT_RAW_PARQUET_DIRECTORY,
+    endpoints: Sequence[str] = DEFAULT_RAW_ENDPOINTS,
+    required_endpoints: Sequence[str] = ("laps", "stints", "drivers"),
+) -> dict[str, pd.DataFrame]:
+    """Load full or partial endpoint parquet files, preferring full files.
+
+    For each endpoint and year, ``{endpoint}_{year}.parquet`` is selected
+    before ``{endpoint}_{year}_partial.parquet`` and
+    ``{endpoint}_partial_{year}.parquet``. Missing optional endpoint files are
+    logged and represented by empty DataFrames. Required endpoints must have a
+    file for every requested year.
+    """
+    selected_years = tuple(dict.fromkeys(int(year) for year in years))
+    if not selected_years:
+        raise ValueError("years must contain at least one season")
+
+    directory = Path(data_directory)
+    loaded: dict[str, list[pd.DataFrame]] = {
+        endpoint: [] for endpoint in endpoints
+    }
+    missing_required: list[str] = []
+    for year in selected_years:
+        for endpoint in endpoints:
+            full_path = directory / f"{endpoint}_{year}.parquet"
+            partial_paths = (
+                directory / f"{endpoint}_{year}_partial.parquet",
+                directory / f"{endpoint}_partial_{year}.parquet",
+            )
+            selected_path = next(
+                (
+                    candidate
+                    for candidate in (full_path, *partial_paths)
+                    if candidate.is_file()
+                ),
+                None,
+            )
+            if selected_path is None:
+                logger.warning(
+                    "No full or partial parquet found for endpoint %s, year %s",
+                    endpoint,
+                    year,
+                )
+                if endpoint in required_endpoints:
+                    missing_required.append(f"{endpoint}_{year}")
+                continue
+
+            logger.info("Loading OpenF1 parquet file: %s", selected_path)
+            frame = pd.read_parquet(selected_path)
+            if frame.empty and endpoint in required_endpoints:
+                missing_required.append(f"{endpoint}_{year} (empty)")
+            loaded[endpoint].append(frame)
+
+    if missing_required:
+        raise FileNotFoundError(
+            "Missing required full or partial OpenF1 parquet files: "
+            + ", ".join(missing_required)
+        )
+
+    return {
+        endpoint: (
+            pd.concat(frames, ignore_index=True, sort=False)
+            if frames
+            else pd.DataFrame()
+        )
+        for endpoint, frames in loaded.items()
+    }
+
+
+def main() -> int:
+    """Load raw endpoint parquets, clean laps, estimate pit loss, and save."""
+    parser = argparse.ArgumentParser(
+        description="Clean cached OpenF1 parquet data and estimate pit loss."
+    )
+    parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=Path("data/raw/openf1_parquet"),
+        help="directory containing per-endpoint OpenF1 parquet files",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        default=Path("data/processed"),
+        help="directory for laps_clean.parquet and pit_loss.parquet",
+    )
+    parser.add_argument(
+        "--years",
+        type=int,
+        nargs="+",
+        default=[2023, 2024, 2025],
+        help="seasons to load (default: 2023 2024 2025)",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logger.info(
+        "Starting OpenF1 cleaning for seasons %s from %s",
+        args.years,
+        args.raw_dir,
+    )
+    if not args.raw_dir.is_dir() or not any(
+        args.raw_dir.glob("*.parquet")
+    ):
+        logger.error(
+            "No raw parquet files found in %s; expected endpoint/year parquet "
+            "files for seasons %s",
+            args.raw_dir,
+            args.years,
+        )
+        return 1
+
+    try:
+        raw = load_raw_data(
+            years=args.years,
+            data_directory=args.raw_dir,
+            endpoints=CLI_RAW_ENDPOINTS,
+            required_endpoints=("laps",),
+        )
+        logger.info("Cleaning concatenated laps from seasons %s", args.years)
+        laps_clean = clean_laps(raw)
+        logger.info("Estimating circuit pit loss")
+        pit_loss = estimate_pit_loss(laps_clean)
+    except (FileNotFoundError, ValueError, OSError) as error:
+        logger.error("OpenF1 cleaning failed: %s", error)
+        return 1
+
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    laps_path = args.out_dir / "laps_clean.parquet"
+    pit_loss_path = args.out_dir / "pit_loss.parquet"
+    laps_clean.to_parquet(laps_path, index=False)
+    pit_loss.to_parquet(pit_loss_path, index=False)
+
+    if laps_clean.empty:
+        logger.error("Cleaning produced no lap rows; output files were written empty")
+        return 1
+
+    race_counts = (
+        laps_clean[["season", "round", "race"]]
+        .drop_duplicates()
+        .groupby("season", dropna=False)
+        .size()
+        .to_dict()
+    )
+    season_counts = laps_clean.groupby("season", dropna=False).size().to_dict()
+    logger.info(
+        "Wrote %s (%d rows) and %s (%d rows)",
+        laps_path,
+        len(laps_clean),
+        pit_loss_path,
+        len(pit_loss),
+    )
+    logger.info("Lap rows per season: %s", season_counts)
+    logger.info("Races per season: %s", race_counts)
+    return 0
 
 
 def _get_frame(raw: dict[str, pd.DataFrame], endpoint: str) -> pd.DataFrame:
@@ -67,6 +269,126 @@ def _safe_merge(
 def _numeric(series: pd.Series) -> pd.Series:
     """Convert a Series to numeric values, replacing invalid values with NaN."""
     return pd.to_numeric(series, errors="coerce")
+
+
+def _grid_position_lookup(
+    frame: pd.DataFrame,
+    key_columns: tuple[str, str],
+    sort_column: str | None = None,
+) -> dict[tuple[str, str], float]:
+    """Build a driver lookup for valid grid-position fallback records."""
+    required = {*key_columns, "position"}
+    if frame.empty or not required.issubset(frame.columns):
+        return {}
+
+    columns = [*key_columns, "position"]
+    if sort_column is not None and sort_column in frame.columns:
+        columns.append(sort_column)
+    positions = frame.loc[:, columns].copy()
+    positions["position"] = _numeric(positions["position"])
+    positions = positions.dropna(subset=[*key_columns, "position"])
+    positions = positions.loc[
+        np.isfinite(positions["position"]) & positions["position"].gt(0)
+    ]
+    if sort_column is not None and sort_column in positions.columns:
+        if sort_column == "date":
+            positions[sort_column] = pd.to_datetime(
+                positions[sort_column],
+                errors="coerce",
+                utc=True,
+            )
+            positions = positions.dropna(subset=[sort_column])
+        positions = positions.sort_values(sort_column, kind="stable")
+
+    positions["_key_0"] = positions[key_columns[0]].astype("string")
+    positions["_key_1"] = positions[key_columns[1]].astype("string")
+    positions = positions.drop_duplicates(["_key_0", "_key_1"], keep="first")
+    return {
+        (str(key_0), str(key_1)): float(position)
+        for key_0, key_1, position in positions[
+            ["_key_0", "_key_1", "position"]
+        ].itertuples(index=False, name=None)
+    }
+
+
+def _apply_grid_position_fallbacks(
+    laps: pd.DataFrame,
+    raw: dict[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Apply grid-position sources in priority order, retaining the source."""
+    result = laps.copy()
+    result["grid_position"] = np.nan
+    result["grid_source"] = "unavailable"
+
+    starting_grid = _get_frame(raw, "starting_grid")
+    qualifying_results = _get_frame(raw, "session_result")
+    race_positions = _get_frame(raw, "position")
+    lookups = (
+        (
+            "starting_grid",
+            ("session_key", "driver_number"),
+            _grid_position_lookup(
+                starting_grid,
+                ("session_key", "driver_number"),
+            ),
+        ),
+        (
+            "qualifying_session_result",
+            ("meeting_key", "driver_number"),
+            _grid_position_lookup(
+                qualifying_results,
+                ("meeting_key", "driver_number"),
+            ),
+        ),
+        (
+            "race_position",
+            ("session_key", "driver_number"),
+            _grid_position_lookup(
+                race_positions,
+                ("session_key", "driver_number"),
+                sort_column="date",
+            ),
+        ),
+    )
+
+    for source, keys, lookup in lookups:
+        if not lookup or not set(keys).issubset(result.columns):
+            continue
+        normalized_keys = [
+            result[key].astype("string").fillna("") for key in keys
+        ]
+        row_keys = zip(*normalized_keys)
+        values = pd.Series(
+            [
+                lookup.get((str(key_0), str(key_1)), np.nan)
+                for key_0, key_1 in row_keys
+            ],
+            index=result.index,
+            dtype=float,
+        )
+        unresolved = result["grid_position"].isna() & values.notna()
+        result.loc[unresolved, "grid_position"] = values.loc[unresolved]
+        result.loc[unresolved, "grid_source"] = source
+
+    driver_keys = ["session_key", "driver_number"]
+    if set(driver_keys).issubset(result.columns):
+        driver_sources = result.drop_duplicates(driver_keys).groupby(
+            "grid_source",
+            dropna=False,
+        ).size()
+        source_counts = driver_sources.to_dict()
+        for source in (
+            "starting_grid",
+            "qualifying_session_result",
+            "race_position",
+            "unavailable",
+        ):
+            source_counts.setdefault(source, 0)
+        logger.info(
+            "Grid position sources by driver: %s",
+            source_counts,
+        )
+    return result
 
 
 
@@ -129,13 +451,22 @@ def clean_laps(
         .reset_index(drop=True)
     )
 
-    # Extract lap durations.
-    laps["lap_time_s"] = laps.get(
+    # Keep only plausible raw durations for pace-model inputs. Durations above
+    # 300 seconds can include stoppages and are not representative lap pace.
+    raw_duration = laps.get(
         "lap_duration",
         pd.Series(np.nan, index=laps.index),
     )
+    raw_lap_time = _numeric(raw_duration)
+    valid_raw_duration = (
+        np.isfinite(raw_lap_time)
+        & raw_lap_time.ge(MIN_PLAUSIBLE_LAP_DURATION_S)
+        & raw_lap_time.le(MAX_PLAUSIBLE_LAP_DURATION_S)
+    )
+    laps["lap_time_s"] = raw_lap_time.where(valid_raw_duration)
 
-    # Estimate missing durations using consecutive lap timestamps.
+    # Use timestamp differences only when OpenF1 supplied no raw duration.
+    # A fallback is valid only for a finite 30-300 second interval.
     if "date_start" in laps.columns:
         previous_start = laps.groupby(
             ["session_key", "driver_number"]
@@ -144,17 +475,16 @@ def clean_laps(
         timestamp_difference = (
             laps["date_start"] - previous_start
         ).dt.total_seconds()
-
-        missing_duration = laps["lap_time_s"].isna()
-
-        laps.loc[missing_duration, "lap_time_s"] = (
-            timestamp_difference[missing_duration]
+        valid_fallback = (
+            np.isfinite(timestamp_difference)
+            & timestamp_difference.ge(MIN_PLAUSIBLE_TIMESTAMP_FALLBACK_S)
+            & timestamp_difference.le(MAX_PLAUSIBLE_LAP_DURATION_S)
         )
+        missing_raw_duration = raw_lap_time.isna()
+        use_fallback = missing_raw_duration & valid_fallback
+        laps.loc[use_fallback, "lap_time_s"] = timestamp_difference[use_fallback]
 
     laps["lap_time_s"] = _numeric(laps["lap_time_s"])
-
-    invalid_time = laps["lap_time_s"].le(0)
-    laps.loc[invalid_time, "lap_time_s"] = np.nan
 
     logger.info("Prepared %d driver-lap records", len(laps))
 
@@ -693,52 +1023,8 @@ def clean_laps(
                     errors="ignore",
                 )
 
-    # Merge starting-grid positions.
-    laps["grid_position"] = np.nan
-
-    starting_grid = _get_frame(raw, "starting_grid")
-
-    if not starting_grid.empty:
-        required_grid = {
-            "session_key",
-            "driver_number",
-            "position",
-        }
-
-        if required_grid.issubset(
-            starting_grid.columns
-        ):
-            grid = starting_grid[
-                ["session_key", "driver_number", "position"]
-            ].copy()
-
-            grid["position"] = _numeric(grid["position"])
-
-            grid = grid.drop_duplicates(
-                subset=["session_key", "driver_number"]
-            ).rename(
-                columns={"position": "grid_position"}
-            )
-
-            laps = _safe_merge(
-                laps,
-                grid,
-                on=["session_key", "driver_number"],
-            )
-
-            if "grid_position_y" in laps.columns:
-                laps["grid_position"] = (
-                    laps["grid_position_y"].combine_first(
-                        laps["grid_position_x"]
-                    )
-                )
-
-                laps = laps.drop(
-                    columns=[
-                        "grid_position_x",
-                        "grid_position_y",
-                    ]
-                )
+    # Apply starting grid, qualifying result, then earliest race position.
+    laps = _apply_grid_position_fallbacks(laps, raw)
 
     # Calculate fuel-corrected lap times.
     maximum_lap = laps.groupby(
@@ -753,6 +1039,12 @@ def clean_laps(
         laps["lap_time_s"]
         - fuel_effect * laps_remaining
     )
+    valid_pace_time = (
+        np.isfinite(laps["lap_time_s"])
+        & laps["lap_time_s"].gt(0)
+        & laps["lap_time_s"].le(MAX_PLAUSIBLE_LAP_DURATION_S)
+    )
+    laps.loc[~valid_pace_time, "fuel_corrected_time_s"] = np.nan
 
     # Ensure the exact required output columns exist.
     for column in LAPS_CLEAN_COLUMNS:
@@ -829,8 +1121,8 @@ def estimate_pit_loss(
     """
     output_columns = [
         "circuit",
-        "pit_loss_median_s",
-        "pit_loss_std_s",
+        "median_pit_loss_s",
+        "std_pit_loss_s",
         "n_stops",
     ]
 
@@ -1008,8 +1300,8 @@ def estimate_pit_loss(
     result = (
         filtered_stops.groupby("circuit")["pit_loss_s"]
         .agg(
-            pit_loss_median_s="median",
-            pit_loss_std_s="std",
+            median_pit_loss_s="median",
+            std_pit_loss_s="std",
             n_stops="count",
         )
         .reset_index()
@@ -1025,3 +1317,6 @@ def estimate_pit_loss(
 
     return result[output_columns]
 
+
+if __name__ == "__main__":
+    raise SystemExit(main())

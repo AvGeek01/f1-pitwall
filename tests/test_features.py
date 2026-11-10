@@ -3,7 +3,35 @@
 
 import pandas as pd
 
-from src.features.build import build_features
+from src.features.build import _add_gap_features, build_features
+
+
+def test_gap_features_leave_gaps_missing_when_all_cumulative_times_are_missing() -> None:
+    """Retain rows and leave gaps missing when no car has a valid race time."""
+    laps = pd.DataFrame(
+        {
+            "driver": ["AAA", "BBB", "AAA", "BBB"],
+            "lap_number": [1, 1, 2, 2],
+            "lap_time_s": [90.0, 91.0, float("nan"), float("nan")],
+        },
+        index=[10, 11, 12, 13],
+    )
+
+    result = _add_gap_features(laps)
+
+    assert len(result) == len(laps)
+    assert sorted(result.index.tolist()) == sorted(laps.index.tolist())
+    affected_lap = result.loc[result["lap_number"].eq(2)]
+    assert affected_lap[
+        ["gap_ahead", "gap_behind", "gap_leader"]
+    ].isna().all().all()
+    valid_lap = result.loc[result["lap_number"].eq(1)].set_index("driver")
+    assert valid_lap.loc["AAA", "gap_leader"] == 0.0
+    assert valid_lap.loc["BBB", "gap_leader"] == 1.0
+    assert pd.isna(valid_lap.loc["AAA", "gap_ahead"])
+    assert valid_lap.loc["AAA", "gap_behind"] == 1.0
+    assert valid_lap.loc["BBB", "gap_ahead"] == 1.0
+    assert pd.isna(valid_lap.loc["BBB", "gap_behind"])
 
 
 def test_build_features_on_synthetic_data() -> None:
@@ -129,4 +157,54 @@ def test_features_do_not_use_future_laps():
         check_exact=False,
         rtol=1e-9,
         atol=1e-9,
+    )
+
+
+def test_features_accept_legacy_pit_loss_columns() -> None:
+    """Normalize legacy pit-loss names before feature construction."""
+    laps = pd.read_parquet("data/processed/synthetic_laps_clean.parquet")
+    pit_loss = pd.read_parquet("data/processed/synthetic_pit_loss.parquet")
+    legacy_pit_loss = pit_loss.rename(
+        columns={
+            "median_pit_loss_s": "pit_loss_median_s",
+            "std_pit_loss_s": "pit_loss_std_s",
+        }
+    )
+
+    features = build_features(laps.iloc[:1000], legacy_pit_loss)
+
+    assert len(features) == 1000
+    assert "undercut_threat" in features.columns
+
+
+def test_missing_lap_time_does_not_create_cumulative_time() -> None:
+    """Keep unknown cumulative timing missing after a driver has a missing lap."""
+    laps = pd.read_parquet("data/processed/synthetic_laps_clean.parquet")
+    pit_loss = pd.read_parquet("data/processed/synthetic_pit_loss.parquet")
+    race_key = laps[["season", "round", "race"]].drop_duplicates().iloc[0]
+    race_laps = laps.loc[
+        laps["season"].eq(race_key["season"])
+        & laps["round"].eq(race_key["round"])
+        & laps["race"].eq(race_key["race"])
+    ].copy()
+    driver = str(race_laps["driver"].iloc[0])
+    target_lap = 20
+    missing_mask = (
+        race_laps["driver"].eq(driver)
+        & race_laps["lap_number"].eq(target_lap)
+    )
+    race_laps.loc[
+        missing_mask,
+        ["lap_time_s", "fuel_corrected_time_s"],
+    ] = float("nan")
+
+    features = build_features(race_laps, pit_loss)
+    driver_features = features.loc[features["driver"].eq(driver)].set_index(
+        "lap_number"
+    )
+
+    assert len(features) == len(race_laps)
+    assert pd.isna(driver_features.loc[target_lap, "cumulative_race_time"])
+    assert pd.isna(
+        driver_features.loc[target_lap + 1, "cumulative_race_time"]
     )

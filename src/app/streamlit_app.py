@@ -13,6 +13,10 @@ import pandas as pd
 import streamlit as st
 from xgboost.core import XGBoostError
 
+from src.data.schema import (
+    MAX_PLAUSIBLE_LAP_DURATION_S,
+    normalize_pit_loss_schema,
+)
 from src.features.build import build_features
 from src.models.degradation import (
     DEFAULT_COMPOUNDS,
@@ -345,7 +349,7 @@ def main() -> None:
 
     try:
         laps = load_parquet(str(laps_path))
-        pit_loss = load_parquet(str(pit_loss_path))
+        pit_loss = normalize_pit_loss_schema(load_parquet(str(pit_loss_path)))
         features = load_model_features(laps, pit_loss)
     except (FileNotFoundError, ValueError, KeyError) as error:
         st.error(f"Could not prepare race data: {error}")
@@ -496,6 +500,7 @@ def main() -> None:
         st.warning("No valid remaining-race strategies can be constructed.")
         return
 
+    pit_loss = normalize_pit_loss_schema(pit_loss)
     pit_rows = pit_loss.loc[pit_loss["circuit"].eq(circuit)]
     if len(pit_rows) != 1:
         st.error(f"Expected one pit-loss estimate for {circuit}, found {len(pit_rows)}.")
@@ -514,8 +519,23 @@ def main() -> None:
             if current_curve_available and degradation_model is not None
             else 0.0
         )
+        current_pace = pd.to_numeric(
+            pd.Series([current["fuel_corrected_time_s"]]),
+            errors="coerce",
+        ).iloc[0]
+        if (
+            pd.isna(current_pace)
+            or not np.isfinite(current_pace)
+            or current_pace <= 0
+            or current_pace > MAX_PLAUSIBLE_LAP_DURATION_S
+        ):
+            st.warning(
+                "The selected lap has no plausible measured pace; "
+                "remaining-race simulation is unavailable."
+            )
+            return
         base_pace_s = (
-            float(current["fuel_corrected_time_s"])
+            float(current_pace)
             - DEFAULT_COMPOUND_OFFSETS_S.get(current_compound, 0.0)
             - degradation_loss
         )

@@ -19,12 +19,19 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
-from src.data.clean import LAPS_CLEAN_COLUMNS, clean_laps, estimate_pit_loss
+from src.data.clean import (
+    LAPS_CLEAN_COLUMNS,
+    clean_laps,
+    estimate_pit_loss,
+    load_raw_data,
+)
+from src.data.schema import normalize_pit_loss_schema
 from src.data.fetch import (
     CORE_ENDPOINTS,
     RAW_DIR as DEFAULT_RAW_DIR,
     SESSION_ENDPOINTS,
     OpenF1Error,
+    SESSION_RESULT_ENDPOINT,
     assign_rounds,
     fetch_season,
     finished_sessions,
@@ -41,7 +48,12 @@ from src.sim.validation import validate_simulator
 LOGGER = logging.getLogger("pitwall.pipeline")
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SEASONS = (2023, 2024, 2025)
-ENDPOINTS = ("sessions", "meetings", *SESSION_ENDPOINTS)
+ENDPOINTS = (
+    "sessions",
+    "meetings",
+    *SESSION_ENDPOINTS,
+    SESSION_RESULT_ENDPOINT,
+)
 RACE_KEYS = ("season", "round", "race")
 SMOKE_NUMERIC_FEATURES = (
     "lap_number",
@@ -180,6 +192,7 @@ def _rebuild_cached_season(
         }
         for session in calendar
     ]
+    missing_grid_meeting_rounds: dict[object, int] = {}
     for session in finished:
         round_number = int(session["round"])
         session_key = session.get("session_key")
@@ -201,6 +214,74 @@ def _rebuild_cached_season(
             records_by_endpoint[endpoint].extend(
                 tag_records(records, year, round_number, int(session_key))
             )
+        driver_numbers = {
+            record.get("driver_number")
+            for record in _read_json_cache(
+                raw_directory / "drivers" / f"{session_key}.json",
+                "drivers",
+            )
+            if record.get("driver_number") is not None
+        }
+        grid_records_path = raw_directory / "starting_grid" / f"{session_key}.json"
+        grid_records = (
+            _read_json_cache(grid_records_path, "starting_grid")
+            if grid_records_path.is_file()
+            else []
+        )
+        grid_numbers = {
+            record.get("driver_number")
+            for record in grid_records
+            if record.get("driver_number") is not None
+            and pd.notna(pd.to_numeric(record.get("position"), errors="coerce"))
+        }
+        meeting_key = session.get("meeting_key")
+        if (
+            meeting_key is not None
+            and (not grid_numbers or not driver_numbers.issubset(grid_numbers))
+        ):
+            missing_grid_meeting_rounds[meeting_key] = round_number
+
+    qualifying_sessions_path = (
+        raw_directory / "sessions" / f"{year}_qualifying.json"
+    )
+    if qualifying_sessions_path.is_file() and missing_grid_meeting_rounds:
+        qualifying_sessions = _read_json_cache(
+            qualifying_sessions_path,
+            "qualifying sessions",
+        )
+        for qualifying_session in qualifying_sessions:
+            meeting_key = qualifying_session.get("meeting_key")
+            session_key = qualifying_session.get("session_key")
+            if (
+                qualifying_session.get("session_name") != "Qualifying"
+                or qualifying_session.get("is_cancelled")
+                or meeting_key not in missing_grid_meeting_rounds
+                or session_key is None
+                or not finished_sessions([qualifying_session], now)
+            ):
+                continue
+            result_path = (
+                raw_directory
+                / SESSION_RESULT_ENDPOINT
+                / f"{session_key}.json"
+            )
+            if not result_path.is_file():
+                LOGGER.warning("Optional cached qualifying results missing: %s", result_path)
+                continue
+            result_records = _read_json_cache(
+                result_path,
+                SESSION_RESULT_ENDPOINT,
+            )
+            records_by_endpoint[SESSION_RESULT_ENDPOINT].extend(
+                {
+                    **record,
+                    "season": year,
+                    "round": missing_grid_meeting_rounds[meeting_key],
+                    "meeting_key": meeting_key,
+                    "session_key": session_key,
+                }
+                for record in result_records
+            )
 
     meeting_records = []
     for meeting in meetings:
@@ -220,36 +301,17 @@ def _load_raw_seasons(
     parquet_directory: Path,
 ) -> dict[str, pd.DataFrame]:
     """Read and concatenate endpoint parquet files for selected seasons."""
-    raw: dict[str, pd.DataFrame] = {}
-    for endpoint in ENDPOINTS:
-        frames: list[pd.DataFrame] = []
-        for year in seasons:
-            path = parquet_directory / f"{endpoint}_{year}.parquet"
-            if not path.is_file():
-                if endpoint in CORE_ENDPOINTS:
-                    raise FileNotFoundError(
-                        f"Required fetched parquet is missing: {path}"
-                    )
-                continue
-            frames.append(pd.read_parquet(path))
-        if frames:
-            raw[endpoint] = pd.concat(frames, ignore_index=True, sort=False)
-        elif endpoint in CORE_ENDPOINTS:
-            raise FileNotFoundError(
-                f"No {endpoint} parquet files found in {parquet_directory}"
-            )
-        else:
-            raw[endpoint] = pd.DataFrame()
-    return raw
+    return load_raw_data(
+        years=seasons,
+        data_directory=parquet_directory,
+        endpoints=ENDPOINTS,
+        required_endpoints=CORE_ENDPOINTS,
+    )
 
 
 def _normalize_pit_loss(pit_loss: pd.DataFrame) -> pd.DataFrame:
     """Add simulator-compatible pit-loss names and validate statistics."""
-    result = pit_loss.copy()
-    if "median_pit_loss_s" not in result and "pit_loss_median_s" in result:
-        result["median_pit_loss_s"] = result["pit_loss_median_s"]
-    if "std_pit_loss_s" not in result and "pit_loss_std_s" in result:
-        result["std_pit_loss_s"] = result["pit_loss_std_s"]
+    result = normalize_pit_loss_schema(pit_loss)
     _require_columns(
         result,
         ("circuit", "median_pit_loss_s", "std_pit_loss_s", "n_stops"),

@@ -46,6 +46,7 @@ SESSION_ENDPOINTS: tuple[str, ...] = (
 
 CORE_ENDPOINTS: tuple[str, ...] = ("laps", "stints", "drivers")
 OPTIONAL_ENDPOINT = "intervals"
+SESSION_RESULT_ENDPOINT = "session_result"
 
 
 class OpenF1Error(RuntimeError):
@@ -266,6 +267,81 @@ def _fetch_session(
     return out
 
 
+def _fetch_qualifying_session_results(
+    client: OpenF1Client,
+    year: int,
+    missing_meeting_rounds: dict[int, int],
+    force: bool,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    """Fetch qualifying-session results only for meetings needing grid fallback."""
+    if not missing_meeting_rounds:
+        return []
+
+    cache_key = f"{year}_qualifying"
+    try:
+        qualifying_sessions = client.fetch_cached(
+            "sessions",
+            cache_key,
+            {"year": year, "session_name": "Qualifying"},
+            force=force or year >= now.year,
+        )
+    except OpenF1Error as exc:
+        log.warning("Could not fetch qualifying sessions for %d: %s", year, exc)
+        return []
+
+    qualifying_sessions = [
+        session
+        for session in qualifying_sessions
+        if session.get("session_name") == "Qualifying"
+        and not session.get("is_cancelled")
+        and session.get("meeting_key") in missing_meeting_rounds
+    ]
+    qualifying_sessions = finished_sessions(qualifying_sessions, now)
+    results: list[dict[str, Any]] = []
+    for session in qualifying_sessions:
+        session_key = session.get("session_key")
+        meeting_key = session.get("meeting_key")
+        if session_key is None or meeting_key is None:
+            log.warning(
+                "Skipping qualifying session with missing key fields: %s",
+                session,
+            )
+            continue
+        try:
+            records = client.fetch_cached(
+                SESSION_RESULT_ENDPOINT,
+                session_key,
+                {"session_key": session_key},
+                force=force,
+            )
+        except OpenF1Error as exc:
+            log.warning(
+                "Could not fetch qualifying results for session %s: %s",
+                session_key,
+                exc,
+            )
+            continue
+        if not records:
+            log.warning(
+                "No qualifying session results for meeting %s",
+                meeting_key,
+            )
+            continue
+        round_number = missing_meeting_rounds[int(meeting_key)]
+        results.extend(
+            {
+                **record,
+                "season": year,
+                "round": round_number,
+                "meeting_key": meeting_key,
+                "session_key": session_key,
+            }
+            for record in records
+        )
+    return results
+
+
 def fetch_season(
     year: int,
     force: bool = False,
@@ -323,6 +399,7 @@ def fetch_season(
     collected: dict[str, list[dict[str, Any]]] = {ep: [] for ep in endpoints}
     done: list[int] = []
     failed: list[int] = []
+    missing_grid_meeting_rounds: dict[int, int] = {}
     for session in tqdm(todo, desc=f"OpenF1 {year}", unit="race"):
         key, round_number = session["session_key"], session["round"]
         try:
@@ -333,8 +410,34 @@ def fetch_season(
             continue
         for endpoint, records in data.items():
             collected[endpoint].extend(tag_records(records, year, round_number, key))
+        driver_numbers = {
+            record.get("driver_number")
+            for record in data.get("drivers", [])
+            if record.get("driver_number") is not None
+        }
+        grid_numbers = {
+            record.get("driver_number")
+            for record in data.get("starting_grid", [])
+            if record.get("driver_number") is not None
+            and pd.notna(pd.to_numeric(record.get("position"), errors="coerce"))
+        }
+        if (
+            session.get("meeting_key") is not None
+            and (not grid_numbers or not driver_numbers.issubset(grid_numbers))
+        ):
+            missing_grid_meeting_rounds[int(session["meeting_key"])] = int(
+                round_number
+            )
         done.append(round_number)
         log.info("Round %s done (%d/%d)", round_number, len(done) + len(failed), len(todo))
+
+    qualifying_results = _fetch_qualifying_session_results(
+        client,
+        year,
+        missing_grid_meeting_rounds,
+        force,
+        now,
+    )
 
     parquet_dir = Path(parquet_dir)
     parquet_dir.mkdir(parents=True, exist_ok=True)
@@ -359,6 +462,22 @@ def fetch_season(
     if done:
         for endpoint in endpoints:
             _save(f"{endpoint}{suffix}", to_frame(endpoint, collected[endpoint]))
+    if qualifying_results and rounds is None:
+        _save(
+            SESSION_RESULT_ENDPOINT,
+            to_frame(SESSION_RESULT_ENDPOINT, qualifying_results),
+        )
+    elif qualifying_results:
+        partial_results = [
+            record
+            for record in qualifying_results
+            if record.get("round") in set(rounds or [])
+        ]
+        if partial_results:
+            _save(
+                f"{SESSION_RESULT_ENDPOINT}_partial",
+                to_frame(SESSION_RESULT_ENDPOINT, partial_results),
+            )
     else:
         log.error("Season %d: no races could be fetched, no per-race parquet written", year)
 

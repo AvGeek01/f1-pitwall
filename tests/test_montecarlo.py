@@ -78,6 +78,31 @@ def test_adding_a_stop_increases_race_time_without_degradation() -> None:
     np.testing.assert_allclose(one_stop - no_stop, 20.0)
 
 
+def test_simulate_race_accepts_legacy_pit_loss_columns() -> None:
+    """Normalize legacy pit-loss names before sampling simulator costs."""
+    legacy_pit_loss = pd.DataFrame(
+        {
+            "circuit": ["Test Circuit"],
+            "pit_loss_median_s": [20.0],
+            "pit_loss_std_s": [0.0],
+            "n_stops": [5],
+        }
+    )
+
+    race_times = simulate_race(
+        [("MEDIUM", 5)],
+        "Test Circuit",
+        5,
+        n_sims=2,
+        pit_loss_data=legacy_pit_loss,
+        degradation_fn=zero_degradation,
+        lap_time_noise_s=0.0,
+        safety_car_probability=0.0,
+    )
+
+    assert race_times.shape == (2,)
+
+
 def test_initial_pit_stop_is_charged_and_uses_fresh_tyre_age() -> None:
     """A pit-now simulation charges a stop and resets its first stint age."""
     worn_tyre = simulate_race(

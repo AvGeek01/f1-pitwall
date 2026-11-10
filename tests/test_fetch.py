@@ -269,6 +269,47 @@ def test_fetch_season_writes_one_parquet_per_endpoint(tmp_path: Path) -> None:
     assert min(gaps) >= 2.5 - 1e-9
 
 
+def test_fetches_qualifying_results_when_starting_grid_is_empty(
+    tmp_path: Path,
+) -> None:
+    """Fetch same-meeting qualifying results when a race grid is unavailable."""
+    routes = _routes()
+    routes[("sessions", 2024)][0] = FakeResponse(
+        200,
+        [
+            *CALENDAR,
+            _session(
+                201,
+                1,
+                "2024-03-01T10:00:00+00:00",
+                "2024-03-01T12:00:00+00:00",
+                name="Qualifying",
+            ),
+        ],
+    )
+    routes[("starting_grid", 101)] = [FakeResponse(200, [])]
+    routes[("session_result", 201)] = [
+        FakeResponse(
+            200,
+            [{"meeting_key": 1, "driver_number": 1, "position": 2}],
+        )
+    ]
+    client, _, _ = make_client(tmp_path, routes)
+
+    written = fetch_season(
+        2024,
+        client=client,
+        parquet_dir=tmp_path / "pq",
+        now=NOW,
+    )
+
+    assert "session_result" in written
+    results = pd.read_parquet(written["session_result"])
+    assert results.loc[0, "meeting_key"] == 1
+    assert results.loc[0, "round"] == 1
+    assert results.loc[0, "position"] == 2
+
+
 def test_failing_race_is_skipped_without_crashing(tmp_path: Path) -> None:
     client, _, _ = make_client(tmp_path, _routes(bad_laps=(102,)))
     written = fetch_season(2024, client=client, parquet_dir=tmp_path / "pq", now=NOW)

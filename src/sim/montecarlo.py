@@ -14,11 +14,12 @@ from src.models.degradation import (
     DegradationModel,
     load_degradation_model,
 )
+from src.data.schema import normalize_pit_loss_schema
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PIT_LOSS_PATH = PROJECT_ROOT / "data" / "processed" / "pit_loss.parquet"
-PIT_LOSS_COLUMNS = ("circuit", "median_pit_loss_s", "std_pit_loss_s")
 DEFAULT_COMPOUND_OFFSETS_S = {"SOFT": 0.0, "MEDIUM": 0.35, "HARD": 0.75}
+PIT_LOSS_COLUMNS = ("circuit", "median_pit_loss_s", "std_pit_loss_s")
 Strategy: TypeAlias = Sequence[tuple[str, int]]
 DegradationFunction: TypeAlias = Callable[[str, float, str], float]
 
@@ -54,6 +55,7 @@ def _get_pit_loss(
         if not path.is_file():
             raise FileNotFoundError(f"Pit-loss parquet not found: {path}")
         pit_loss_data = pd.read_parquet(path)
+    pit_loss_data = normalize_pit_loss_schema(pit_loss_data)
 
     missing_columns = sorted(set(PIT_LOSS_COLUMNS).difference(pit_loss_data.columns))
     if missing_columns:

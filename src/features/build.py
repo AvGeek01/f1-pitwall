@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.data.schema import normalize_pit_loss_schema
+
 logger = logging.getLogger(__name__)
 
 RACE_COLUMNS = ["season", "round", "race"]
@@ -58,15 +60,9 @@ def _validate_inputs(
             "Pit-loss data must contain a circuit column."
         )
 
-    valid_pit_loss_columns = {
-        "pit_loss_median_s",
-        "median_pit_loss_s",
-    }
-
-    if not valid_pit_loss_columns.intersection(pit_loss.columns):
+    if "median_pit_loss_s" not in pit_loss.columns:
         raise ValueError(
-            "Pit-loss data must contain either "
-            "'pit_loss_median_s' or 'median_pit_loss_s'."
+            "Pit-loss data must contain 'median_pit_loss_s'."
         )
 
     if laps.empty:
@@ -229,8 +225,10 @@ def _add_gap_features(
         ["driver", "lap_number"]
     )
 
-    group["cumulative_race_time"] = (
-        group.groupby("driver")["lap_time_s"].cumsum()
+    group["cumulative_race_time"] = group.groupby("driver")[
+        "lap_time_s"
+    ].transform(
+        lambda lap_times: lap_times.cumsum(skipna=False)
     )
 
     group["gap_ahead"] = np.nan
@@ -258,6 +256,9 @@ def _add_gap_features(
         times = current[
             "cumulative_race_time"
         ].to_numpy(dtype=float)
+
+        if times.size == 0:
+            continue
 
         ahead_gaps = np.full(len(current), np.nan)
         behind_gaps = np.full(len(current), np.nan)
@@ -299,7 +300,7 @@ def _add_undercut_threat(
 
     circuit_data = pit_loss.loc[
         pit_loss["circuit"] == circuit,
-        "pit_loss_median_s",
+        "median_pit_loss_s",
     ]
 
     if circuit_data.empty or pd.isna(circuit_data.iloc[0]):
@@ -405,16 +406,8 @@ def build_features(
         One row per driver per lap, containing features and targets.
     """
 
+    pit_loss = normalize_pit_loss_schema(pit_loss)
     _validate_inputs(laps, pit_loss)
-
-    pit_loss = pit_loss.copy()
-
-    if "pit_loss_median_s" not in pit_loss.columns:
-        pit_loss = pit_loss.rename(
-            columns={
-                "median_pit_loss_s": "pit_loss_median_s"
-            }
-        )
 
     features = laps.copy()
 

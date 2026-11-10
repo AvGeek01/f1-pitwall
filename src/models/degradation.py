@@ -10,6 +10,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from src.data.schema import MAX_PLAUSIBLE_LAP_DURATION_S
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "laps_clean.parquet"
 DEFAULT_PLOT_PATH = PROJECT_ROOT / "reports" / "figures" / "degradation_curves.png"
@@ -159,7 +161,10 @@ def fit_degradation(
     for flag in EXCLUSION_FLAGS:
         clean_mask &= laps[flag].eq(False).fillna(False)
 
-    clean_laps = laps.loc[clean_mask, list(REQUIRED_COLUMNS)].copy()
+    selected_columns = list(REQUIRED_COLUMNS)
+    if "lap_time_s" in laps.columns:
+        selected_columns.append("lap_time_s")
+    clean_laps = laps.loc[clean_mask, selected_columns].copy()
     clean_laps["tyre_life"] = pd.to_numeric(
         clean_laps["tyre_life"],
         errors="coerce",
@@ -168,14 +173,31 @@ def fit_degradation(
         clean_laps["fuel_corrected_time_s"],
         errors="coerce",
     )
+    if "lap_time_s" in clean_laps.columns:
+        clean_laps["lap_time_s"] = pd.to_numeric(
+            clean_laps["lap_time_s"],
+            errors="coerce",
+        )
     clean_laps = clean_laps.dropna(
         subset=("circuit", "compound", "tyre_life", "fuel_corrected_time_s")
     )
+    if "lap_time_s" in clean_laps.columns:
+        clean_laps = clean_laps.dropna(subset=("lap_time_s",))
     clean_laps = clean_laps[
         np.isfinite(clean_laps["tyre_life"])
         & np.isfinite(clean_laps["fuel_corrected_time_s"])
         & clean_laps["tyre_life"].ge(0)
+        & clean_laps["fuel_corrected_time_s"].gt(0)
+        & clean_laps["fuel_corrected_time_s"].le(
+            MAX_PLAUSIBLE_LAP_DURATION_S
+        )
     ]
+    if "lap_time_s" in clean_laps.columns:
+        clean_laps = clean_laps[
+            np.isfinite(clean_laps["lap_time_s"])
+            & clean_laps["lap_time_s"].gt(0)
+            & clean_laps["lap_time_s"].le(MAX_PLAUSIBLE_LAP_DURATION_S)
+        ]
     if clean_laps.empty:
         raise ValueError("No valid clean laps are available for fitting")
 

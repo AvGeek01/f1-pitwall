@@ -31,14 +31,14 @@ def make_synthetic_degradation_laps() -> pd.DataFrame:
         baseline = 70.0 + len(circuit) + len(compound)
         for tyre_life in range(1, 21):
             for _ in range(12):
+                lap_time = baseline + slope * tyre_life + rng.normal(0.0, 0.01)
                 rows.append(
                     {
                         "circuit": circuit,
                         "compound": compound,
                         "tyre_life": tyre_life,
-                        "fuel_corrected_time_s": (
-                            baseline + slope * tyre_life + rng.normal(0.0, 0.01)
-                        ),
+                        "lap_time_s": lap_time,
+                        "fuel_corrected_time_s": lap_time,
                         "is_inlap": False,
                         "is_outlap": False,
                         "is_sc": False,
@@ -72,6 +72,25 @@ def test_fit_degradation_excludes_flagged_laps() -> None:
     flagged_lap["fuel_corrected_time_s"] = 1000.0
     actual = fit_degradation(
         pd.concat((laps, flagged_lap), ignore_index=True),
+        n_bootstrap=50,
+        seed=42,
+    )
+
+    assert (
+        actual.degradation("SOFT", 10, "Bahrain")
+        == expected.degradation("SOFT", 10, "Bahrain")
+    )
+
+
+def test_fit_degradation_excludes_missing_and_implausible_pace() -> None:
+    """Missing and over-300-second pace values do not affect fitted curves."""
+    laps = make_synthetic_degradation_laps()
+    expected = fit_degradation(laps, n_bootstrap=50, seed=42)
+    invalid_laps = laps.iloc[:3].copy()
+    invalid_laps["lap_time_s"] = [80.0, np.nan, 400.0]
+    invalid_laps["fuel_corrected_time_s"] = [np.nan, 80.0, 80.0]
+    actual = fit_degradation(
+        pd.concat((laps, invalid_laps), ignore_index=True),
         n_bootstrap=50,
         seed=42,
     )
