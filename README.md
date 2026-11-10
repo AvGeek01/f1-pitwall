@@ -130,18 +130,6 @@ intervals are the saved 95% bootstrap intervals.
 | XGBoost | 0.697 | 0.689 | [0.632, 0.743] |
 | Circuit-majority baseline | 0.400 | 0.190 | [0.170, 0.209] |
 
-### Simulator and degradation evaluation
-
-Fill in these project-level evaluation results when the corresponding
-validation run has been reviewed:
-
-| Evaluation | Result |
-|---|---|
-| Simulator validation season / races | [Fill in] |
-| Best-strategy stop-count agreement | [Fill in] |
-| Simulator race-time error (mean / median) | [Fill in] |
-| Degradation fit summary by compound | [Fill in] |
-
 ## Limitations
 
 - **Noisy behavioural labels:** teams optimize under private information and
