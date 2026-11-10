@@ -168,19 +168,10 @@ validation run has been reviewed:
 - **Stop-count classes:** the A6 target groups all races with three or more
   stops into one class and excludes zero-stop driver-race records.
 
-## Who built what
+## Build information
 
-Replace the placeholders with the project's final contributor names and
-credits:
-
-| Area | Contributor |
-|---|---|
-| Project owner, problem framing, and final strategy interpretation | [Name] |
-| OpenF1 data collection and cleaning | [Name] |
-| Feature engineering and leakage controls | [Name] |
-| Pit-behaviour and stop-count models | [Name] |
-| Degradation model, simulator, and validation | [Name] |
-| Streamlit application, testing, and documentation | [Name] |
+This project was built by Rishit & Dennis.
+This project is built for informational purposes only.
 
 ## Setup
 
